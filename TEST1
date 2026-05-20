@@ -1,0 +1,52 @@
+from machine import Pin, I2S
+import time
+
+# INMP441 MIC
+MIC_SCK = 14
+MIC_WS  = 15
+MIC_SD  = 32
+
+# MAX98357A SPEAKER
+SPK_BCLK = 26
+SPK_LRC  = 25
+SPK_DIN  = 22
+
+SAMPLE_RATE = 16000
+BUFFER_SIZE = 1024
+GAIN = 1
+
+print("Mic to speaker starting...")
+
+mic = I2S(
+    0,
+    sck=Pin(MIC_SCK),
+    ws=Pin(MIC_WS),
+    sd=Pin(MIC_SD),
+    mode=I2S.RX,
+    bits=16,
+    format=I2S.MONO,
+    rate=SAMPLE_RATE,
+    ibuf=8000
+)
+
+speaker = I2S(
+    1,
+    sck=Pin(SPK_BCLK),
+    ws=Pin(SPK_LRC),
+    sd=Pin(SPK_DIN),
+    mode=I2S.TX,
+    bits=16,
+    format=I2S.MONO,
+    rate=SAMPLE_RATE,
+    ibuf=8000
+)
+
+buf = bytearray(BUFFER_SIZE)
+
+print("Speak near mic...")
+
+while True:
+    n = mic.readinto(buf)
+
+    if n:
+        speaker.write(buf[:n])
