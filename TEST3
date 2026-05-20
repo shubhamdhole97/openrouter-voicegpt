@@ -1,0 +1,187 @@
+import network
+import urequests
+import time
+import struct
+import gc
+from machine import Pin, I2S
+
+WIFI_SSID = "Apple"
+WIFI_PASSWORD = "11111111"
+
+BACKEND_URL = "http://3.110.130.40:8000/api/esp32/voice-chat"
+
+MIC_SCK = 14
+MIC_WS  = 15
+MIC_SD  = 32
+
+SPK_BCLK = 26
+SPK_LRC  = 25
+SPK_DIN  = 22
+
+SAMPLE_RATE = 16000
+BITS = 16
+CHANNELS = 1
+
+RECORD_SECONDS = 2
+BUFFER_SIZE = 512
+
+print("VoiceGPT ESP32 stream mode")
+
+
+def connect_wifi():
+    wifi = network.WLAN(network.STA_IF)
+    wifi.active(True)
+    wifi.connect(WIFI_SSID, WIFI_PASSWORD)
+
+    print("Connecting WiFi...")
+    while not wifi.isconnected():
+        print(".")
+        time.sleep(1)
+
+    print("WiFi connected")
+    print("IP:", wifi.ifconfig()[0])
+
+
+def make_wav_header(data_size):
+    byte_rate = SAMPLE_RATE * CHANNELS * BITS // 8
+    block_align = CHANNELS * BITS // 8
+
+    return struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + data_size,
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,
+        CHANNELS,
+        SAMPLE_RATE,
+        byte_rate,
+        block_align,
+        BITS,
+        b"data",
+        data_size,
+    )
+
+
+mic = I2S(
+    0,
+    sck=Pin(MIC_SCK),
+    ws=Pin(MIC_WS),
+    sd=Pin(MIC_SD),
+    mode=I2S.RX,
+    bits=16,
+    format=I2S.MONO,
+    rate=SAMPLE_RATE,
+    ibuf=4000
+)
+
+speaker = I2S(
+    1,
+    sck=Pin(SPK_BCLK),
+    ws=Pin(SPK_LRC),
+    sd=Pin(SPK_DIN),
+    mode=I2S.TX,
+    bits=16,
+    format=I2S.MONO,
+    rate=SAMPLE_RATE,
+    ibuf=4000
+)
+
+
+def record_wav():
+    gc.collect()
+    print("Free memory:", gc.mem_free())
+    print("Speak now loudly near mic...")
+
+    audio_size = SAMPLE_RATE * 2 * RECORD_SECONDS
+    wav_size = 44 + audio_size
+
+    wav = bytearray(wav_size)
+    wav[0:44] = make_wav_header(audio_size)
+
+    pos = 44
+    buf = bytearray(BUFFER_SIZE)
+
+    while pos < wav_size:
+        n = mic.readinto(buf)
+        if n:
+            remain = wav_size - pos
+            copy_len = n if n < remain else remain
+            wav[pos:pos + copy_len] = buf[:copy_len]
+            pos += copy_len
+
+    del buf
+    gc.collect()
+
+    print("Recording done. WAV bytes:", len(wav))
+    return wav
+
+
+def send_and_play(wav):
+    print("Sending to backend...")
+    print("Upload bytes:", len(wav))
+
+    try:
+        res = urequests.post(
+            BACKEND_URL,
+            data=wav,
+            headers={"Content-Type": "audio/wav"}
+        )
+
+        print("HTTP Status:", res.status_code)
+
+        if res.status_code != 200:
+            print("Backend error:")
+            print(res.text)
+            res.close()
+            return
+
+        print("Playing reply stream...")
+
+        first = True
+
+        while True:
+            chunk = res.raw.read(512)
+            if not chunk:
+                break
+
+            if first:
+                first = False
+                if chunk[0:4] == b"RIFF":
+                    chunk = chunk[44:]
+
+            if chunk:
+                speaker.write(chunk)
+
+        res.close()
+        print("Playback done")
+
+    except Exception as e:
+        print("Send/play error:", e)
+
+
+connect_wifi()
+
+while True:
+    print("")
+    print("Ready. Speak after 2 seconds...")
+    time.sleep(2)
+
+    try:
+        wav = record_wav()
+        send_and_play(wav)
+
+        del wav
+        gc.collect()
+
+    except MemoryError:
+        print("MemoryError. Cleaning memory...")
+        gc.collect()
+
+    except Exception as e:
+        print("Error:", e)
+        gc.collect()
+
+    print("Waiting...")
+    time.sleep(3)
